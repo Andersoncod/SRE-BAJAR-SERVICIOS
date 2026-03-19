@@ -1,0 +1,307 @@
+# Nombre dinámico del pipeline con fecha y solicitante
+name: $(Date:yyyyMMdd) $(Build.RequestedFor) Modificacion Estado Flujo Remesas
+
+parameters:
+
+# ================================
+# PARAMETROS DE EJECUCION
+# ================================
+
+# Parametro solicitud del ambiente
+- name: env
+  displayName: 'Seleccione el ambiente donde desea modificar el estado'
+  type: string
+  default: ''
+  values:
+    - 'qa'   # Ambiente de pruebas
+    - 'pdn'  # Ambiente productivo
+
+# Parametro solicitud del item
+# Permite recibir uno o varios identificadores separados por coma
+- name: item
+  displayName: 'Digite el nombre del servicio a modificar. Si el servicio pertenece a una categoria digite el productId. Si el servicio NO pertenece a una categoria digite el featureId'
+  type: string
+  default: ''
+
+# Parametro opcion a ejecutar
+# Define si el flujo se habilita o se bloquea
+- name: opcion
+  displayName: 'Opcion que desea realizar'
+  type: string
+  default: ''
+  values:
+    - 'Habilitar'    # Activa procesamiento de remesas
+    - 'Inhabilitar'  # Bloquea procesamiento de remesas
+
+# Parametro reinicio del micro
+# Permite forzar redeploy del microservicio en ECS
+- name: reiniciarMicro
+  displayName: 'Desea reiniciar el micro despues de modificar el estado?'
+  type: string
+  default: 'No'
+  values:
+    - 'No'  # No reinicia servicios
+    - 'Si'  # Fuerza nuevo deployment en ECS
+
+# ================================
+# VARIABLES GLOBALES
+# ================================
+variables:
+
+# Nombre tabla DynamoDB ambiente QA
+- name: 'Table_QA'
+  value: 'table-remittances-co-partners-qa'
+
+# Nombre tabla DynamoDB ambiente Productivo
+- name: 'Table_PDN'
+  value: 'table-remittances-co-partners-pdn'
+
+# ================================
+# EJECUCION MANUAL (SIN TRIGGER CI/CD)
+# ================================
+trigger: none
+
+stages:
+
+# ================================
+# STAGE 1 — APROBACION MANUAL
+# ================================
+- stage: habilitar_inhabilitar_flujo_remesas_remesadora
+  displayName: Habilitar / Inhabilitar Flujo de Remesas por Remesadora
+  jobs:
+    - deployment: approval
+      displayName: 'Aprobacion de ejecucion'
+      environment: 'Aprobadores_ASD'  # Grupo aprobador requerido antes de ejecutar cambios
+
+# ================================
+# STAGE 2 — EJECUCION EN QA
+# ================================
+- ${{ if eq(parameters.env, 'qa') }}:
+  - stage: habilitar_inhabilitar_flujo_remesas_qa
+    displayName: Habilitar / Inhabilitar Flujo de Remesas QA
+    dependsOn: habilitar_inhabilitar_flujo_remesas_remesadora
+    jobs:
+      - job: Habilitar_Inhabilitar_Flujo_Remesas_QA
+        pool: Nequi-Operations  # Agent pool con permisos AWS
+        steps:
+
+          # ================================
+          # STEP 1 — ASUMIR ROL AWS
+          # ================================
+          - task: AWSShellScript@1
+            displayName: Assume operation role
+            inputs:
+              awsCredentials: 'nequi-co-financial-services-qc-operacion-aws'
+              regionName: 'us-east-1'
+              scriptType: 'inline'
+              inlineScript: |
+                # Obtiene ID de la cuenta AWS actual
+                id=$(aws sts get-caller-identity --query Account --output text)
+
+                # Asume rol con permisos de operación sobre DynamoDB y ECS
+                CREDS=$(aws sts assume-role --role-arn arn:aws:iam::$id:role/NEQ-SR-DB-Operation --role-session-name $BUILD_REQUESTEDFOREMAIL --duration-seconds 1800)
+
+                # Extrae credenciales temporales
+                AWS_ACCESS_KEY_ID="$(echo $CREDS | jq -r '.Credentials.AccessKeyId')"
+                AWS_SECRET_ACCESS_KEY="$(echo $CREDS | jq -r '.Credentials.SecretAccessKey')"
+                AWS_SESSION_TOKEN="$(echo $CREDS | jq -r '.Credentials.SessionToken')"
+                AWS_EXPIRATION=$(echo $CREDS | jq -r '.Credentials.Expiration')
+
+                # Publica credenciales como variables del pipeline
+                echo "##vso[task.setvariable variable=AWS_ACCESS_KEY_ID]$AWS_ACCESS_KEY_ID"
+                echo "##vso[task.setvariable variable=AWS_SECRET_ACCESS_KEY]$AWS_SECRET_ACCESS_KEY"
+                echo "##vso[task.setvariable variable=AWS_SESSION_TOKEN]$AWS_SESSION_TOKEN"
+
+          # ================================
+          # STEP 2 — SCRIPT MODIFICACION DYNAMODB
+          # ================================
+          - task: PythonScript@0
+            displayName: Modifying_Remittance_Flag_PDN
+            inputs:
+              pythonInterpreter: /usr/bin/python3
+              scriptSource: 'inline'
+              script: |
+                import boto3
+
+                print("===== INICIO SCRIPT MODIFICACION REMESAS PDN =====")
+
+                
+                # Parametros recibidos desde el pipeline
+                
+                items = "${{ parameters.item }}"
+                opcion = "${{ parameters.opcion }}"
+                reiniciar_micro = "${{ parameters.reiniciarMicro }}"
+                table_name = "$(Table_PDN)"
+
+                print("Items recibidos:", items)
+                print("Opcion seleccionada:", opcion)
+                print("Reiniciar micro:", reiniciar_micro)
+                print("Tabla DynamoDB:", table_name)
+
+                try:
+                    # Convierte opcion a booleano para flag isActive
+                    if opcion == "Habilitar":
+                        flag = True
+                    else:
+                        flag = False
+
+                    print("Estado calculado del flag:", flag)
+
+                    # Permite múltiples IDs separados por coma
+                    product_ids = [item.strip() for item in items.split(",") if item.strip()]
+
+                    print("Cantidad de productId a procesar:", len(product_ids))
+                    print("Lista de productId a procesar:", product_ids)
+
+                    print("Conectando a DynamoDB...")
+                    dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+                    table = dynamodb.Table(table_name)
+
+                    # Recorre cada aliado/remesadora
+                    for productId in product_ids:
+                        print("--------------------------------------------------")
+                        print("Procesando productId:", productId)
+                        print("Consultando registro actual...")
+
+                        response_get = table.get_item(
+                            Key={
+                                'productId': productId
+                            }
+                        )
+
+                        print("Registro actual:")
+                        print(response_get)
+
+                        if 'Item' in response_get:
+                            print("Actualizando estado del flag...")
+                            response_update = table.update_item(
+                                Key={
+                                    'productId': productId
+                                },
+                                UpdateExpression="SET isActive = :flag",
+                                ExpressionAttributeValues={
+                                    ':flag': flag
+                                },
+                                ReturnValues="UPDATED_NEW"
+                            )
+
+                            print("Respuesta DynamoDB despues de actualizar:")
+                            print(response_update)
+                        else:
+                            print("No se encontro registro para el productId:", productId)
+
+                    # Reinicio opcional del microservicio
+                    if reiniciar_micro == "Si":
+                        print("===== INICIO REINICIO DEL MICRO ECS =====")
+
+                        cluster_name = "ecs-remittances-pdn"
+                        service_name = "svc-apis-pdn"
+
+                        print("Cluster objetivo:", cluster_name)
+                        print("Servicio objetivo:", service_name)
+
+                        ecs = boto3.client('ecs', region_name='us-east-1')
+
+                        response_ecs = ecs.update_service(
+                            cluster=cluster_name,
+                            service=service_name,
+                            forceNewDeployment=True
+                        )
+
+                        print("Micro reiniciado correctamente.")
+                        print("Respuesta ECS:")
+                        print(response_ecs)
+                        print("===== FIN REINICIO DEL MICRO ECS =====")
+                    else:
+                        print("No se solicitó reinicio del micro. Se deja sin cambios el ECS.")
+
+                    print("==================================================")
+                    print("===== ACTUALIZACION COMPLETADA CORRECTAMENTE PDN =====")
+                    print("==================================================")
+
+                except Exception as e:
+                    print("===== ERROR EN LA EJECUCION PDN =====")
+                    print("Detalle del error:")
+                    print(str(e))
+
+# ================================
+# STAGE 3 — EJECUCION EN PRODUCCION
+# ================================
+- ${{ if eq(parameters.env, 'pdn') }}:
+  - stage: habilitar_inhabilitar_flujo_remesas_pdn
+    displayName: Habilitar / Inhabilitar Flujo de Remesas PDN
+    dependsOn: habilitar_inhabilitar_flujo_remesas_remesadora
+    jobs:
+      - job: Habilitar_Inhabilitar_Flujo_Remesas_PDN
+        pool: Nequi-Operations
+        steps:
+
+          # Repite proceso de asunción de rol para productivo
+          - task: AWSShellScript@1
+            displayName: Assume operation role
+            inputs:
+              awsCredentials: 'nequi-co-financial-services-pdn-operacion-aws'
+              regionName: 'us-east-1'
+              scriptType: 'inline'
+              inlineScript: |
+                echo "===== INICIO ASSUME ROLE PDN ====="
+                id=$(aws sts get-caller-identity --query Account --output text)
+                CREDS=$(aws sts assume-role --role-arn arn:aws:iam::$id:role/NEQ-SR-DB-Operation --role-session-name $BUILD_REQUESTEDFOREMAIL --duration-seconds 1800)
+                AWS_ACCESS_KEY_ID="$(echo $CREDS | jq -r '.Credentials.AccessKeyId')"
+                AWS_SECRET_ACCESS_KEY="$(echo $CREDS | jq -r '.Credentials.SecretAccessKey')"
+                AWS_SESSION_TOKEN="$(echo $CREDS | jq -r '.Credentials.SessionToken')"
+                AWS_EXPIRATION=$(echo $CREDS | jq -r '.Credentials.Expiration')
+                echo "##vso[task.setvariable variable=AWS_ACCESS_KEY_ID]$AWS_ACCESS_KEY_ID"
+                echo "##vso[task.setvariable variable=AWS_SECRET_ACCESS_KEY]$AWS_SECRET_ACCESS_KEY"
+                echo "##vso[task.setvariable variable=AWS_SESSION_TOKEN]$AWS_SESSION_TOKEN"
+
+          # Script Python replica proceso QA en entorno productivo
+          - task: PythonScript@0
+            displayName: Modifying_Remittance_Flag_PDN
+            inputs:
+              pythonInterpreter: /usr/bin/python3
+              scriptSource: 'inline'
+              script: |
+                import boto3
+                items = "${{ parameters.item }}"
+                opcion = "${{ parameters.opcion }}"
+                reiniciar_micro = "${{ parameters.reiniciarMicro }}"
+                table_name = "$(Table_PDN)"
+                print("Items recibidos:", items)
+                print("Opcion seleccionada:", opcion)
+                print("Reiniciar micro:", reiniciar_micro)
+                print("Tabla DynamoDB:", table_name)
+                try:
+                    if opcion == "Habilitar":
+                        flag = True
+                    else:
+                        flag = False
+                    print("Estado calculado del flag:", flag)
+                    product_ids = [item.strip() for item in items.split(",") if item.strip()]
+                    print("Cantidad de productId a procesar:", len(product_ids))
+                    print("Lista de productId a procesar:", product_ids)
+                    print("Conectando a DynamoDB...")
+                    dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+                    table = dynamodb.Table(table_name)
+                    for productId in product_ids:
+                        print("Procesando productId:", productId)
+                        response_get = table.get_item(Key={'productId': productId})
+                        if 'Item' in response_get:
+                            response_update = table.update_item(
+                                Key={'productId': productId},
+                                UpdateExpression="SET isActive = :flag",
+                                ExpressionAttributeValues={':flag': flag},
+                                ReturnValues="UPDATED_NEW"
+                            )
+                            print(response_update)
+                        else:
+                            print("No se encontro registro para el productId:", productId)
+                    if reiniciar_micro == "Si":
+                        ecs = boto3.client('ecs', region_name='us-east-1')
+                        ecs.update_service(cluster="ecs-remittances-pdn", service="svc-apis-pdn", forceNewDeployment=True)
+                        print("Micro reiniciado correctamente.")
+                    else:
+                        print("No se solicitó reinicio del micro.")
+                except Exception as e:
+                    print("===== ERROR EN LA EJECUCION PDN =====")
+                    print(str(e))
