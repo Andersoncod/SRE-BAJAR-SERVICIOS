@@ -9,22 +9,24 @@ Perfecto — aquí tienes el README **numerado y con tabla de contenido**, como 
 1. [Objetivo](#1-objetivo)
 2. [Beneficios](#2-beneficios)
 3. [Parámetros del Pipeline](#3-parámetros-del-pipeline)
+   
    3.1 [Ambiente](#31-ambiente)
    3.2 [Item](#32-item)
    3.3 [Opción](#33-opción)
    3.4 [Reiniciar Micro](#34-reiniciar-micro)
-4. [Flujo de Ejecución](#4-flujo-de-ejecución)
-5. [Proceso Técnico](#5-proceso-técnico)
+   
+5. [Flujo de Ejecución](#4-flujo-de-ejecución)
+6. [Proceso Técnico](#5-proceso-técnico)
    5.1 [Aprobación](#51-aprobación)
    5.2 [Asunción de Rol](#52-asunción-de-rol)
    5.3 [Modificación en Base de Datos](#53-modificación-en-base-de-datos)
    5.4 [Reinicio de Microservicio](#54-reinicio-de-microservicio)
-6. [Resultado](#6-resultado)
-7. [Tecnologías Utilizadas](#7-tecnologías-utilizadas)
-8. [Casos de Uso](#8-casos-de-uso)
-9. [Buenas Prácticas](#9-buenas-prácticas)
-10. [Riesgos Mitigados](#10-riesgos-mitigados)
-11. [Autor](#11-autor)
+7. [Resultado](#6-resultado)
+8. [Tecnologías Utilizadas](#7-tecnologías-utilizadas)
+9. [Casos de Uso](#8-casos-de-uso)
+10. [Buenas Prácticas](#9-buenas-prácticas)
+11. [Riesgos Mitigados](#10-riesgos-mitigados)
+12. [Autor](#11-autor)
 
 ---
 
